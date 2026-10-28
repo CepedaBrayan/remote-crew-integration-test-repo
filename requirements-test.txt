@@ -1,3 +1,4 @@
 -r app/requirements.txt
 pytest==9.*
 httpx==0.28.*
+ruff==0.0.0
