@@ -104,3 +104,52 @@ docker-compose down -v && docker-compose up --build
 - If something is ambiguous, make a decision and document it in your README.
 
 Good luck.
+
+## Requirement 1: webhook implementation
+
+The app creates a unique index on `resident_ledger.bigpms_event_id` before
+registering its callback with BigPMS. Registration has a 5-second request timeout
+and up to three attempts; exhausted retries fail startup instead of leaving an
+apparently healthy service that receives no webhooks.
+
+`app/webhooks.py` verifies HMAC-SHA256 over the original request bytes with a
+constant-time comparison, then validates the fields used by the ledger. Amounts
+must be positive integer cents and timestamps must include a timezone. The
+property is resolved through the resident's unit, rather than hardcoded.
+
+The payment insert and successful webhook audit share one transaction. A unique
+index and `ON CONFLICT DO NOTHING` make duplicate deliveries safe under
+concurrency, including events already imported through another channel. The
+future feed sync should use the same conflict target. Adding this index is
+permitted by SPEC's schema-extension rule; the supplied SQL files are unchanged.
+
+The supplied audit table has one row per event ID. Redelivery updates that row to
+`duplicate` while preserving its original payload. Rejected deliveries use a
+separate generated receipt ID and store the raw body, so an invalid signature
+cannot reserve or overwrite a legitimate event ID. Transaction failures roll back
+before a separate failed receipt is attempted. If PostgreSQL itself is unavailable,
+that receipt cannot be persisted and the failure is logged.
+
+Responses: `200` for processed/duplicate payments, `401` for invalid or missing
+signatures, `422` for invalid payloads or unknown residents, and `503` for storage
+failures. Blocking database work runs in FastAPI's thread pool.
+
+### Tests
+
+With PostgreSQL running, install the test dependencies and run:
+
+```bash
+python -m pip install -r requirements-test.txt
+# PowerShell: $env:TEST_DATABASE_URL = "postgres://leaseflow:leaseflow@localhost:5432/leaseflow"
+export TEST_DATABASE_URL=postgres://leaseflow:leaseflow@localhost:5432/leaseflow
+python -m pytest -q
+```
+
+Tests create and remove an isolated schema; existing application tables are not
+modified. They cover signatures, payload validation, duplicates, eight concurrent
+deliveries, rollback after an audit-write failure, database unavailability, and
+subscription registration/retries. GitHub Actions runs them against PostgreSQL 16.
+
+AI usage for this feature: ChatGPT/Codex generated the implementation, tests, and
+these notes. Candidate review and explanation of the decisions are still required.
+Requirements 2 and 3 remain the starter stubs.

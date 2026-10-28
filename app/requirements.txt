@@ -3,3 +3,5 @@ uvicorn[standard]==0.32.*
 psycopg2-binary==2.9.*
 APScheduler==3.10.*
 requests==2.32.*
+
+pydantic==2.*
