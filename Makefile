@@ -12,7 +12,7 @@ endif
 
 .PHONY: help up down stop start restart rebuild ps \
 	logs logs-app logs-bigpms logs-db shell db test reset \
-	lint lint-fix format format-check check
+	lint lint-fix format format-check check test-unit test-e2e test-all install-dev
 
 help: ## Show available commands
 	@echo "make up              Build and start services"
@@ -28,7 +28,11 @@ help: ## Show available commands
 	@echo "make logs-db         Follow PostgreSQL logs"
 	@echo "make shell           Open app container shell"
 	@echo "make db              Open PostgreSQL console"
-	@echo "make test            Run tests using the local venv"
+	@echo "make install-dev     Install lint and test dependencies"
+	@echo "make test            Run all unit tests (no Docker needed)"
+	@echo "make test-unit       Run all unit tests (alias)"
+	@echo "make test-e2e        Run disposable Docker E2E tests"
+	@echo "make test-all        Run unit tests followed by E2E tests"
 	@echo "make lint            Check lint errors in app/"
 	@echo "make lint-fix        Fix correctable lint errors in app/"
 	@echo "make format          Fix lint errors and format app/"
@@ -77,8 +81,20 @@ shell: ## Open a shell inside the app container
 db: ## Open the PostgreSQL console
 	$(COMPOSE) exec db psql -U leaseflow -d leaseflow
 
-test: ## Requires test dependencies and TEST_DATABASE_URL
-	$(PYTHON) -m pytest -q
+install-dev: ## Install local tooling and test dependencies
+	$(PYTHON) -m pip install -r requirements-test.txt
+
+test: test-unit ## Run all unit tests without Docker or PostgreSQL
+
+test-unit: ## Test requirement 1 functions with mocked external dependencies
+	$(PYTHON) -m pytest -q tests/unit
+
+test-e2e: ## Build, test and clean up an isolated Docker stack
+	$(PYTHON) scripts/run_e2e.py
+
+test-all: ## Run unit tests followed by Docker E2E tests
+	$(MAKE) test-unit
+	$(MAKE) test-e2e
 
 lint: ## Check Python lint errors in app/
 	$(PYTHON) -m ruff check app/

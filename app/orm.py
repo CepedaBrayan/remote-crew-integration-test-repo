@@ -7,7 +7,12 @@ from db import dict_cursor, get_conn, put_conn
 
 
 def ensure_payment_events_uniqueness():
-    """Protect the table from duplicate entries."""
+    """Create the unique partner-event index before accepting payments.
+
+    Repeated startup calls leave an existing index in place. Non-null event IDs
+    are unique across all ingestion channels; local charges may retain NULL IDs.
+    Database errors propagate to prevent startup without duplicate protection.
+    """
     conn = get_conn()
     try:
         with conn, conn.cursor() as cur:
@@ -20,7 +25,16 @@ def ensure_payment_events_uniqueness():
 
 
 def record_failure(uuid: UUID, raw_body: bytes, reason: str):
-    """Use a receipt ID so untrusted event IDs cannot overwrite valid payments."""
+    """Persist a rejected delivery in its own transaction.
+
+    Args:
+        uuid: Locally generated receipt ID, independent of any untrusted event ID.
+        raw_body: Received bytes, decoded with replacement for invalid UTF-8.
+        reason: Human-readable rejection or processing failure description.
+
+    Raises:
+        psycopg2.Error: If the audit write fails; the connection is still returned.
+    """
     conn = get_conn()
     try:
         with conn, conn.cursor() as cur:
@@ -40,6 +54,10 @@ def record_failure(uuid: UUID, raw_body: bytes, reason: str):
 
 
 def get_health_check_status():
+    """Return service health after a successful database round trip.
+
+    Database errors propagate so an unavailable database cannot report healthy.
+    """
     conn = get_conn()
     try:
         with conn, conn.cursor() as cur:
@@ -50,6 +68,11 @@ def get_health_check_status():
 
 
 def get_residents():
+    """Return residents and their unit numbers, ordered by resident ID.
+
+    The dictionary cursor produces JSON-compatible rows. The connection is
+    returned to the pool on both successful reads and database errors.
+    """
     conn = get_conn()
     try:
         with conn, dict_cursor(conn) as cur:
@@ -64,7 +87,22 @@ def get_residents():
 
 
 def apply_payment(event: PaymentEvent) -> str:
-    """Validate the payment and commit it together with its audit record."""
+    """Persist an already validated payment and its audit result atomically.
+
+    Args:
+        event: PaymentEvent validated by the webhook layer after authentication.
+
+    Returns:
+        "processed" when a ledger row was inserted, otherwise "duplicate".
+
+    Raises:
+        ValueError: If the resident has no matching unit/property.
+        psycopg2.Error: On storage failure; both writes are rolled back.
+
+    The unique index arbitrates concurrent deliveries. Redelivery updates the
+    existing audit status but preserves its first stored payload. Model dumping
+    preserves extra fields while normalizing typed values such as timestamps.
+    """
 
     conn = get_conn()
     try:

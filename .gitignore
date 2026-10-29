@@ -5,3 +5,7 @@ __pycache__/
 .atl/
 .venv/
 .vscode/
+
+.pytest_cache/
+.ruff_cache/
+artifacts/

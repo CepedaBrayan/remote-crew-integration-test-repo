@@ -43,11 +43,13 @@ app = FastAPI(title="LeaseFlow Integration Service")
 
 @app.get("/api/health")
 def health():
+    """Expose application health only after PostgreSQL responds successfully."""
     return get_health_check_status()
 
 
 @app.get("/api/v1/residents")
 def list_residents():
+    """Return seeded residents and unit numbers from the local database."""
     return get_residents()
 
 
@@ -63,12 +65,21 @@ def list_residents():
 
 @app.on_event("startup")
 def register_webhook_subscription():
+    """Install duplicate protection before registering the callback at startup.
+
+    Any unhandled database or registration error aborts application startup.
+    """
     ensure_payment_events_uniqueness()
     register_subscription(BIGPMS_API_URL, CALLBACK_URL, WEBHOOK_SECRET)
 
 
 @app.post("/webhooks/bigpms")
 async def bigpms_webhook(request: Request):
+    """Authenticate the raw body before validating or applying any payment.
+
+    Persistence runs in the thread pool because psycopg2 is synchronous.
+    A successful response acknowledges both new payments and safe redeliveries.
+    """
     raw_body = await request.body()
     await auth(raw_body, request.headers.get("X-BigPMS-Signature", ""), WEBHOOK_SECRET)
     return await run_in_threadpool(process_webhook, raw_body)
@@ -97,12 +108,14 @@ scheduler.add_job(
 
 @app.on_event("startup")
 def start_scheduler():
+    """Start the provided interval scheduler after subscription setup succeeds."""
     scheduler.start()
     log.info("Scheduler started (sync every %ss)", SYNC_INTERVAL_SECONDS)
 
 
 @app.on_event("shutdown")
 def stop_scheduler():
+    """Stop scheduling new runs without waiting for an already running job."""
     scheduler.shutdown(wait=False)
 
 
@@ -113,5 +126,6 @@ def stop_scheduler():
 
 @app.get("/api/v1/reconciliation")
 def reconciliation_report():
+    """Return HTTP 501 until requirement 3 is implemented."""
     # TODO: implement — see docs/SPEC.md
     return Response(status_code=501, content="Not implemented")

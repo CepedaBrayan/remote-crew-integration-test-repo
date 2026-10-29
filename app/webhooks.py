@@ -15,7 +15,21 @@ log = logging.getLogger("leaseflow.webhooks")
 
 
 def register_subscription(api_url: str, callback_url: str, secret: str):
-    """Retry brief startup failures; fail startup if no subscription is registered."""
+    """Register the callback URL and signing secret with BigPMS at startup.
+
+    Args:
+        api_url: Partner base URL, with or without a trailing slash.
+        callback_url: URL reachable by BigPMS for payment delivery.
+        secret: Shared HMAC secret; never included in application log messages.
+
+    Each request has a five-second Requests timeout. Up to three attempts are
+    made, separated by one- and two-second waits. Registration is idempotent
+    for a callback URL, but does not verify future callback reachability.
+
+    Raises:
+        requests.RequestException: The last failure after retries are exhausted,
+            allowing FastAPI startup to fail rather than silently lose webhooks.
+    """
     for attempt in range(3):
         try:
             response = requests.post(
@@ -35,6 +49,18 @@ def register_subscription(api_url: str, callback_url: str, secret: str):
 
 
 def process_webhook(raw_body: bytes) -> dict:
+    """Validate an authenticated body and delegate its atomic persistence.
+
+    Args:
+        raw_body: Original JSON bytes; the caller must verify the signature first.
+
+    Returns:
+        A status dictionary containing "processed" or "duplicate".
+
+    Raises:
+        HTTPException: HTTP 422 for invalid data or an unknown resident; HTTP 503
+            for storage failures. Rejections receive a best-effort audit receipt.
+    """
     try:
         event = PaymentEvent.model_validate_json(raw_body)
     except ValidationError:
