@@ -150,15 +150,15 @@ def test_snapshot_readonly_and_connection_release(modules, monkeypatch, fail):
     if fail:
         cur.execute.side_effect = psycopg2.OperationalError("offline")
     release = Mock()
-    monkeypatch.setattr(modules.reconciliation_store, "get_conn", Mock(return_value=conn))
-    monkeypatch.setattr(modules.reconciliation_store, "put_conn", release)
-    monkeypatch.setattr(modules.reconciliation_store, "dict_cursor", lambda c: c.cursor())
+    monkeypatch.setattr(modules.orm, "get_conn", Mock(return_value=conn))
+    monkeypatch.setattr(modules.orm, "put_conn", release)
+    monkeypatch.setattr(modules.orm, "dict_cursor", lambda c: c.cursor())
     if fail:
         with pytest.raises(psycopg2.OperationalError):
-            modules.reconciliation_store.read_reconciliation_snapshot()
+            modules.orm.read_reconciliation_snapshot()
         assert conn.__exit__.call_args.args[0] is psycopg2.OperationalError
     else:
-        residents, issues = modules.reconciliation_store.read_reconciliation_snapshot()
+        residents, issues = modules.orm.read_reconciliation_snapshot()
         assert residents == [{"resident_id": "r1"}]
         assert issues["duplicate_charges"] == [{"count": 2}]
         assert "REPEATABLE READ, READ ONLY" in cur.execute.call_args_list[0].args[0]

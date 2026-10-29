@@ -23,9 +23,7 @@ def modules():
                     "orm",
                     "utils",
                     "webhooks",
-                    "sync_store",
                     "sync",
-                    "reconciliation_store",
                     "reconciliation",
                     "main",
                 )

@@ -265,7 +265,7 @@ differences; see its solution section below.
   Webhooks retain their existing atomic ledger/audit transaction. Feed ingestion
   does not invent webhook audit rows; its audit lives in `sync_runs`.
 - `app/sync.py` handles HTTP, validation, retries and page orchestration.
-- `app/sync_store.py` handles run ownership and SQL transactions. Each page commits
+- `app/orm.py` handles run ownership and SQL transactions. Each page commits
   its ledger insertions, `sync_state.cursor_seq`, and `sync_runs` counters together.
   A failure in any write rolls back that entire page; earlier committed pages remain.
 - The unique ledger event index is shared by both channels. `ON CONFLICT DO NOTHING`
@@ -384,7 +384,7 @@ All monetary values are integer cents. `delta_cents = local - BigPMS`: zero mean
   roster, so omitted residents are not silently interpreted as zero. A zero total
   must be explicitly supplied. Partner failure and local database failure likewise
   return 503 with no partial or fabricated report; details are logged server-side.
-- `app/reconciliation_store.py` performs three set-based SQL queries in one
+- `app/orm.py` performs three set-based SQL queries in one
   `REPEATABLE READ, READ ONLY` transaction. Payment totals use SUM/GROUP BY and
   include all residents with a LEFT JOIN/COALESCE. Python compares already aggregated
   results; it does not sum ledger rows. Network calls occur before this transaction.
@@ -438,3 +438,25 @@ branch using the discussed design decisions. The candidate should review the SQL
 error policy and snapshot limitation and record actual assessment time. Future
 work includes report freshness monitoring and remediation workflows, rather than
 automatic financial corrections in a GET endpoint.
+
+## Persistence organization
+
+All application SQL now lives in `app/orm.py`. Functions are grouped by shared
+payment persistence, feed ownership/progress, and read-only reconciliation. The
+former `sync_store.py` and `reconciliation_store.py` modules were consolidated
+and removed; services import their persistence functions directly from `orm`.
+`db.py` supplies only the existing connection pool and cursor helpers.
+
+This refactor preserves the transaction contracts: webhook payment/audit writes
+commit together, feed pages commit with cursor/run counters, advisory locks span
+the sync session, and reconciliation uses one read-only repeatable-read snapshot.
+Function documentation describes transaction ownership, failure behavior and
+connection cleanup. `AGENTS.md` and `SKILL.md` require new application queries to
+follow this same boundary. Test-only SQL remains in fixtures/assertions to prepare
+isolated databases and verify real outcomes; supplied schema/seed files are intact.
+
+Run the existing `make check`, `make test-unit`, `make test-e2e` or `make test-all`
+commands. Unit tests now patch the central persistence module; an architecture
+check guards against application database execution outside `orm.py`. Existing
+HTTP/PostgreSQL E2E suites verify the refactor's transaction and recovery behavior.
+This organization change and its documentation/tests were developed with Codex.
