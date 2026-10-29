@@ -4,3 +4,8 @@ __pycache__/
 .idea
 .atl/
 .venv/
+.vscode/
+
+.pytest_cache/
+.ruff_cache/
+artifacts/

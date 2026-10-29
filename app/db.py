@@ -11,12 +11,15 @@ Usage:
     finally:
         put_conn(conn)
 """
+
 import os
 
-from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgres://leaseflow:leaseflow@localhost:5432/leaseflow")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgres://leaseflow:leaseflow@localhost:5432/leaseflow"
+)
 
 _pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=DATABASE_URL)
 
