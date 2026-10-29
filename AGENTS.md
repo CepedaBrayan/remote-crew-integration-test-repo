@@ -11,3 +11,6 @@
 - Run `make check` and `make test-unit`; run `make test-e2e` for ingestion or database changes. Docker must be available for E2E. Report what was actually run and any limitations.
 - Keep the README current with decisions, limitations, commands and honest AI usage. Do not invent candidate time spent.
 - Target the branch requested by the user. Do not merge a PR or reset development data unless explicitly requested.
+
+
+- Keep reconciliation read-only: aggregate in SQL, use one bulk partner endpoint, and report source failures explicitly. Preserve a consistent local snapshot and document the remote timing limitation.

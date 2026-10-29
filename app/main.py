@@ -1,7 +1,7 @@
 """LeaseFlow integration API and scheduler.
 
-Requirements 1 and 2 are implemented: authenticated webhooks and durable feed
-sync. Reconciliation (requirement 3) remains a TODO; see docs/SPEC.md and README.
+Authenticated webhooks, durable feed sync and the read-only reconciliation report
+are implemented. See docs/SPEC.md and README for contracts and decisions.
 """
 
 import logging
@@ -9,8 +9,9 @@ import os
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from auth import auth
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from orm import ensure_payment_events_uniqueness, get_health_check_status, get_residents
+from reconciliation import build_reconciliation_report
 from starlette.concurrency import run_in_threadpool
 from sync import run_feed_sync
 from webhooks import process_webhook, register_subscription
@@ -116,12 +117,11 @@ def stop_scheduler():
 
 
 # ---------------------------------------------------------------------------
-# TODO 3 — Reconciliation report (see SPEC section 3)
+# Requirement 3 — Reconciliation report (see SPEC section 3)
 # ---------------------------------------------------------------------------
 
 
 @app.get("/api/v1/reconciliation")
 def reconciliation_report():
-    """Return HTTP 501 until requirement 3 is implemented."""
-    # TODO: implement — see docs/SPEC.md
-    return Response(status_code=501, content="Not implemented")
+    """Compare local payments with bulk BigPMS totals and expose ledger issues."""
+    return build_reconciliation_report(BIGPMS_API_URL)

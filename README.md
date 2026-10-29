@@ -109,7 +109,7 @@ Good luck.
 
 This first PR implements subscription registration and signed payment processing.
 Requirement 2 is implemented in the follow-up section below. The reconciliation
-report (requirement 3) remains unimplemented.
+report (requirement 3) is implemented in its solution section below.
 
 ### Implementation and module responsibilities
 
@@ -252,8 +252,8 @@ review the final behavior before submission; no time total is inferred here.
 The existing scheduler now calls the feed sync every 30 seconds. It starts from
 `sync_state.cursor_seq` for `bigpms_ledger_events`, requests pages until `has_more`
 is false, and backfills the missing seed payments `evt-1013`–`evt-1020`. It does
-not delete local-only payments such as `evt-9999`. Reconciliation remains out of
-scope for this feature.
+not delete local-only payments such as `evt-9999`. Requirement 3 reports these
+differences; see its solution section below.
 
 ### Implementation and transaction boundaries
 
@@ -362,3 +362,79 @@ the shared insertion refactor, sync service, tests, agent instructions and docum
 The candidate selected the per-page atomicity, duplicate protection, retry and lock
 strategy in discussion and should review the implementation and record actual time
 spent before submission. This section does not claim completion of requirement 3.
+
+
+## Solution — Requirement 3: reconciliation report
+
+`GET /api/v1/reconciliation` compares every local resident's payment total with
+BigPMS, reports local data-quality issues, and never repairs or changes data.
+All monetary values are integer cents. `delta_cents = local - BigPMS`: zero means
+`in_sync`, negative means `missing_local_payments`, positive means
+`local_exceeds_bigpms`. Residents without payments remain present with a zero total.
+
+### Implementation and decisions
+
+- `app/reconciliation.py` fetches the bulk `/api/v1/residents/summaries` endpoint
+  once per successful attempt, validates its response and assembles the report.
+  It never calls per-resident summary endpoints. Three attempts cover connection
+  errors, timeouts, HTTP 429 and 5xx; waits are one and two seconds, overridden by
+  valid Retry-After values on 429. Connect/read timeouts are 3/10 seconds.
+- Missing, duplicate, unexpected resident identities or invalid/negative/non-integer
+  totals fail the comparison with HTTP 503. The dataset assumes a shared resident
+  roster, so omitted residents are not silently interpreted as zero. A zero total
+  must be explicitly supplied. Partner failure and local database failure likewise
+  return 503 with no partial or fabricated report; details are logged server-side.
+- `app/reconciliation_store.py` performs three set-based SQL queries in one
+  `REPEATABLE READ, READ ONLY` transaction. Payment totals use SUM/GROUP BY and
+  include all residents with a LEFT JOIN/COALESCE. Python compares already aggregated
+  results; it does not sum ledger rows. Network calls occur before this transaction.
+- Duplicate charges are groups sharing resident, charge code, cents and UTC date,
+  with COUNT(*) greater than one. UTC is explicit so server timezone settings do
+  not change the grouping. Orphans are individual ledger rows with no resident,
+  detected through NOT EXISTS. Neither charges nor orphaned payments are attributed
+  to an existing resident's payment total.
+- `issues_found` counts duplicate groups plus orphan rows. It does not count extra
+  duplicate copies or residents with payment differences. `residents_out_of_sync`
+  independently counts nonzero deltas. Residents and issue results have stable order.
+
+After backfill at a quiescent moment, the seed produces seven `in_sync` residents,
+res-107 `local_exceeds_bigpms` due to evt-9999, one duplicate-charge group for
+res-105's June rent and one orphan for res-999: `issues_found = 2` and
+`residents_out_of_sync = 1`. The report preserves all three planted anomalies.
+Before backfill, all eight residents have missing local payments.
+
+`generated_at` is the UTC report assembly time. REPEATABLE READ guarantees that
+all local queries see one snapshot; no atomic snapshot spans PostgreSQL and the
+remote partner. New partner payments can briefly produce missing-local deltas
+while webhook/feed processing catches up. This is expected; compare at a quiet
+moment. A partner snapshot timestamp or shared watermark would improve this with
+more time. Repeated report requests are live reads, without a cache.
+
+### Tests, commands and AI usage
+
+Existing commands include all three requirements:
+
+```bash
+make install-dev
+make check
+make test-unit
+make test-e2e
+make test-all
+```
+
+Unit tests cover the single bulk request, retries, Retry-After, payload validation,
+roster completeness, all delta statuses, separate counters, route behavior, and
+read-only transaction/connection handling. New E2E tests run the actual API and
+feed worker against a temporary PostgreSQL database and a stable HTTP partner
+fixture. They check the exact before/after seed report, zero-payment residents,
+UTC charge grouping, one bulk call per report, invalid/unavailable partner data,
+and unchanged ledger data after reads. This stable fixture removes the timing
+ambiguity of comparing two actively changing systems. Existing untouched-mock
+webhook/backfill tests continue to run. All suites run in GitHub Actions and retain
+diagnostics through the existing E2E runner; no additional command is required.
+
+ChatGPT/Codex implemented the report, tests and documentation from the current dev
+branch using the discussed design decisions. The candidate should review the SQL,
+error policy and snapshot limitation and record actual assessment time. Future
+work includes report freshness monitoring and remediation workflows, rather than
+automatic financial corrections in a GET endpoint.

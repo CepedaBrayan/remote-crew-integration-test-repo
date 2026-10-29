@@ -17,7 +17,18 @@ def modules():
         return SimpleNamespace(
             **{
                 name: importlib.import_module(name)
-                for name in ("auth", "dto", "orm", "utils", "webhooks", "sync_store", "sync", "main")
+                for name in (
+                    "auth",
+                    "dto",
+                    "orm",
+                    "utils",
+                    "webhooks",
+                    "sync_store",
+                    "sync",
+                    "reconciliation_store",
+                    "reconciliation",
+                    "main",
+                )
             }
         )
 
