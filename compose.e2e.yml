@@ -1,0 +1,59 @@
+# A separate project with no published ports or development bind mounts.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leaseflow
+      POSTGRES_PASSWORD: leaseflow
+      POSTGRES_DB: leaseflow
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaseflow -d leaseflow"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mock-bigpms:
+    build: ./mock-bigpms
+    environment:
+      WEBHOOK_INTERVAL_SECONDS: '1'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  app:
+    build: ./app
+    # No reload supervisor: failed startup must produce a nonzero process exit.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgres://leaseflow:leaseflow@db:5432/leaseflow
+      BIGPMS_API_URL: http://mock-bigpms:3001
+      CALLBACK_URL: http://app:8000/webhooks/bigpms
+      WEBHOOK_SECRET: leaseflow-dev-secret
+      SYNC_INTERVAL_SECONDS: '30'
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-bigpms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  tests:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    environment:
+      E2E_APP_URL: http://app:8000
+      E2E_PARTNER_URL: http://mock-bigpms:3001
+      E2E_DATABASE_URL: postgres://leaseflow:leaseflow@db:5432/leaseflow
+    volumes:
+      - ./artifacts:/artifacts
+    command: ["python", "-m", "pytest", "-q", "tests/e2e", "--junitxml=/artifacts/e2e.xml"]

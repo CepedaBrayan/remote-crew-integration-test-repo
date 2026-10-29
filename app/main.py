@@ -1,32 +1,31 @@
-"""LeaseFlow Integration Service — your workspace.
+"""LeaseFlow integration API and scheduler.
 
-You are building LeaseFlow's integration layer with BigPMS (the property
-management system of record). Four TODOs, described fully in docs/SPEC.md:
-
-  1. Register a webhook subscription with BigPMS, and implement the callback
-     endpoint (POST /webhooks/bigpms)
-  2. sync_bigpms_ledger_events()  — scheduled feed sync (scheduler wired below)
-  3. GET /api/v1/reconciliation — reconciliation report
-  4. README write-up
-
-The health check, DB pool (db.py), and scheduler wiring are done for you.
-Structure the rest however you like — add modules freely.
+Authenticated webhooks, durable feed sync and the read-only reconciliation report
+are implemented. See docs/SPEC.md and README for contracts and decisions.
 """
+
 import logging
 import os
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, Request, Response
-
-from db import dict_cursor, get_conn, put_conn
+from auth import auth
+from fastapi import FastAPI, Request
+from orm import ensure_payment_events_uniqueness, get_health_check_status, get_residents
+from reconciliation import build_reconciliation_report
+from starlette.concurrency import run_in_threadpool
+from sync import run_feed_sync
+from webhooks import process_webhook, register_subscription
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+
 log = logging.getLogger("leaseflow")
 
 BIGPMS_API_URL = os.environ.get("BIGPMS_API_URL", "http://localhost:3001")
 CALLBACK_URL = os.environ.get("CALLBACK_URL", "http://localhost:8000/webhooks/bigpms")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "leaseflow-dev-secret")
 SYNC_INTERVAL_SECONDS = int(os.environ.get("SYNC_INTERVAL_SECONDS", "30"))
+SYNC_PAGE_SIZE = int(os.environ.get("SYNC_PAGE_SIZE", "10"))
 
 app = FastAPI(title="LeaseFlow Integration Service")
 
@@ -35,34 +34,21 @@ app = FastAPI(title="LeaseFlow Integration Service")
 # Provided endpoints (working — no changes needed)
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/health")
 def health():
-    conn = get_conn()
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        return {"status": "ok", "service": "leaseflow-integration"}
-    finally:
-        put_conn(conn)
+    """Expose application health only after PostgreSQL responds successfully."""
+    return get_health_check_status()
 
 
 @app.get("/api/v1/residents")
 def list_residents():
-    conn = get_conn()
-    try:
-        with conn, dict_cursor(conn) as cur:
-            cur.execute("""
-                SELECT r.id, r.name, u.unit_number
-                FROM residents r JOIN units u ON u.id = r.unit_id
-                ORDER BY r.id
-            """)
-            return {"residents": cur.fetchall()}
-    finally:
-        put_conn(conn)
+    """Return seeded residents and unit numbers from the local database."""
+    return get_residents()
 
 
 # ---------------------------------------------------------------------------
-# TODO 1 — Webhook subscription + callback endpoint (see SPEC section 1)
+# Requirement 1 — Webhook subscription + callback endpoint (see SPEC section 1)
 #
 # Register with BigPMS so it starts sending events:
 #   POST {BIGPMS_API_URL}/api/v1/webhook-subscriptions
@@ -70,50 +56,72 @@ def list_residents():
 # Registration is idempotent — safe to do on every startup.
 # ---------------------------------------------------------------------------
 
+
 @app.on_event("startup")
 def register_webhook_subscription():
-    # TODO: implement — see docs/SPEC.md
-    log.info("webhook subscription: not implemented yet")
+    """Install duplicate protection before registering the callback at startup.
+
+    Any unhandled database or registration error aborts application startup.
+    """
+    ensure_payment_events_uniqueness()
+    register_subscription(BIGPMS_API_URL, CALLBACK_URL, WEBHOOK_SECRET)
 
 
 @app.post("/webhooks/bigpms")
 async def bigpms_webhook(request: Request):
-    raw_body = await request.body()  # you'll need the raw bytes for signature verification
-    # TODO: implement — see docs/SPEC.md
-    return Response(status_code=501, content="Not implemented")
+    """Authenticate the raw body before validating or applying any payment.
+
+    Persistence runs in the thread pool because psycopg2 is synchronous.
+    A successful response acknowledges both new payments and safe redeliveries.
+    """
+    raw_body = await request.body()
+    await auth(raw_body, request.headers.get("X-BigPMS-Signature", ""), WEBHOOK_SECRET)
+    return await run_in_threadpool(process_webhook, raw_body)
 
 
 # ---------------------------------------------------------------------------
-# TODO 2 — Scheduled feed sync (see SPEC section 2)
+# Requirement 2 — Scheduled feed sync (see SPEC section 2)
 # ---------------------------------------------------------------------------
+
 
 def sync_bigpms_ledger_events():
-    """Runs every SYNC_INTERVAL_SECONDS (scheduler is wired below)."""
-    # TODO: implement — see docs/SPEC.md
-    log.info("sync_bigpms_ledger_events: not implemented yet")
+    """Backfill partner payments from the last durable cursor on each interval.
+
+    The sync service records failures and preserves committed pages for the next
+    scheduled attempt. A database advisory lock prevents overlapping workers.
+    """
+    run_feed_sync(BIGPMS_API_URL, SYNC_PAGE_SIZE)
 
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(sync_bigpms_ledger_events, "interval", seconds=SYNC_INTERVAL_SECONDS,
-                  id="bigpms_ledger_events_sync", max_instances=1)
+scheduler.add_job(
+    sync_bigpms_ledger_events,
+    "interval",
+    seconds=SYNC_INTERVAL_SECONDS,
+    id="bigpms_ledger_events_sync",
+    max_instances=1,
+)
 
 
 @app.on_event("startup")
 def start_scheduler():
+    """Start the provided interval scheduler after subscription setup succeeds."""
     scheduler.start()
     log.info("Scheduler started (sync every %ss)", SYNC_INTERVAL_SECONDS)
 
 
 @app.on_event("shutdown")
 def stop_scheduler():
+    """Stop scheduling new runs without waiting for an already running job."""
     scheduler.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
-# TODO 3 — Reconciliation report (see SPEC section 3)
+# Requirement 3 — Reconciliation report (see SPEC section 3)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/v1/reconciliation")
 def reconciliation_report():
-    # TODO: implement — see docs/SPEC.md
-    return Response(status_code=501, content="Not implemented")
+    """Compare local payments with bulk BigPMS totals and expose ledger issues."""
+    return build_reconciliation_report(BIGPMS_API_URL)
