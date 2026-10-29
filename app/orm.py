@@ -86,6 +86,53 @@ def get_residents():
         put_conn(conn)
 
 
+def insert_payment(cur, event: PaymentEvent) -> str:
+    """Insert one validated payment using the caller's transaction.
+
+    Resolve property ownership from the resident. Return processed or duplicate;
+    raise ValueError for an unknown resident. Never commit or write webhook audit
+    rows: callers decide which other writes must share the transaction. The unique
+    event index protects both ingestion channels under concurrent delivery.
+    """
+    cur.execute(
+        """
+        SELECT u.property_id
+        FROM residents r
+        JOIN units u ON u.id = r.unit_id
+        WHERE r.id = %s
+        """,
+        (event.data.resident_id,),
+    )
+    resident = cur.fetchone()
+
+    if resident is None:
+        raise ValueError("Unknown resident")
+
+    cur.execute(
+        """
+        INSERT INTO resident_ledger (
+            property_id,
+            resident_id,
+            entry_type,
+            amount_cents,
+            bigpms_event_id,
+            occurred_at
+        )
+        VALUES (%s, %s, 'payment', %s, %s, %s)
+        ON CONFLICT (bigpms_event_id) DO NOTHING
+        RETURNING id
+        """,
+        (
+            resident[0],
+            event.data.resident_id,
+            event.data.amount_cents,
+            event.event_id,
+            event.occurred_at,
+        ),
+    )
+    return "processed" if cur.fetchone() else "duplicate"
+
+
 def apply_payment(event: PaymentEvent) -> str:
     """Persist an already validated payment and its audit result atomically.
 
@@ -107,43 +154,7 @@ def apply_payment(event: PaymentEvent) -> str:
     conn = get_conn()
     try:
         with conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT u.property_id
-                FROM residents r
-                JOIN units u ON u.id = r.unit_id
-                WHERE r.id = %s
-                """,
-                (event.data.resident_id,),
-            )
-            resident = cur.fetchone()
-
-            if resident is None:
-                raise ValueError("Unknown resident")
-
-            cur.execute(
-                """
-                INSERT INTO resident_ledger (
-                    property_id,
-                    resident_id,
-                    entry_type,
-                    amount_cents,
-                    bigpms_event_id,
-                    occurred_at
-                )
-                VALUES (%s, %s, 'payment', %s, %s, %s)
-                ON CONFLICT (bigpms_event_id) DO NOTHING
-                RETURNING id
-                """,
-                (
-                    resident[0],
-                    event.data.resident_id,
-                    event.data.amount_cents,
-                    event.event_id,
-                    event.occurred_at,
-                ),
-            )
-            status = "processed" if cur.fetchone() else "duplicate"
+            status = insert_payment(cur, event)
 
             # Keep one audit row per event and preserve its original payload.
             cur.execute(

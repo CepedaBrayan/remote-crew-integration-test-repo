@@ -104,11 +104,12 @@ docker-compose down -v && docker-compose up --build
 - If something is ambiguous, make a decision and document it in your README.
 
 Good luck.
+
 ## Solution — Requirement 1: webhook subscription and processing
 
 This first PR implements subscription registration and signed payment processing.
-The scheduled feed sync and reconciliation report remain unimplemented; this PR
-does not claim to complete requirements 2 or 3.
+Requirement 2 is implemented in the follow-up section below. The reconciliation
+report (requirement 3) remains unimplemented.
 
 ### Implementation and module responsibilities
 
@@ -225,8 +226,8 @@ success/failure. Reports and logs remain in ignored `artifacts/`:
 Abruptly killing the runner can prevent cleanup; its generated project name is
 shown in Docker output. Development containers are not removed.
 
-GitHub Actions runs two independent jobs on pushes to `features`/`main` and pull
-requests targeting `main`: unit tests plus app lint, and the same Docker E2E command
+GitHub Actions runs two independent jobs on pushes to `features`, `main`, `dev` and `feature/**`, and pull
+requests targeting `main` or `dev`: unit tests plus app lint, and the same Docker E2E command
 used locally. The E2E job uploads diagnostics even when tests fail. It has a bounded
 job timeout so a broken startup cannot hang indefinitely.
 
@@ -245,3 +246,119 @@ kept validation outside persistence, and added local tooling. This follow-up add
 function documentation, unit/E2E coverage, Makefile commands and CI against that
 refactored branch. The candidate should record their actual assessment time and
 review the final behavior before submission; no time total is inferred here.
+
+## Solution — Requirement 2: scheduled feed sync
+
+The existing scheduler now calls the feed sync every 30 seconds. It starts from
+`sync_state.cursor_seq` for `bigpms_ledger_events`, requests pages until `has_more`
+is false, and backfills the missing seed payments `evt-1013`–`evt-1020`. It does
+not delete local-only payments such as `evt-9999`. Reconciliation remains out of
+scope for this feature.
+
+### Implementation and transaction boundaries
+
+- `app/dto.py` validates the flat feed format separately from the webhook envelope,
+  then normalizes it to the shared payment DTO. It rejects invalid money, timestamps,
+  event types, sequences and paging metadata before committing any progress.
+- `app/orm.py::insert_payment` contains the shared resident-to-property lookup and
+  duplicate-safe INSERT. It accepts the caller's SQL cursor and never commits.
+  Webhooks retain their existing atomic ledger/audit transaction. Feed ingestion
+  does not invent webhook audit rows; its audit lives in `sync_runs`.
+- `app/sync.py` handles HTTP, validation, retries and page orchestration.
+- `app/sync_store.py` handles run ownership and SQL transactions. Each page commits
+  its ledger insertions, `sync_state.cursor_seq`, and `sync_runs` counters together.
+  A failure in any write rolls back that entire page; earlier committed pages remain.
+- The unique ledger event index is shared by both channels. `ON CONFLICT DO NOTHING`
+  handles repeated rows, seed payments, replay and concurrent webhook/feed delivery.
+
+The returned `next_cursor` must equal the maximum sequence in the page (the mock's
+contract), and every event must be newer than the requested cursor. An empty final
+page keeps the same cursor; an empty `has_more` page is rejected. Sequence gaps are
+allowed because the partner owns sequence allocation. Invalid events or unknown
+residents fail the page rather than disappearing behind an advanced cursor. Such
+an event blocks progress until corrected; a durable rejection/replay workflow is a
+future improvement, not a hidden skip policy.
+
+### Retries, overlap and crash recovery
+
+Feed requests have a 3-second connect timeout and a 10-second read timeout. Each
+page gets at most four attempts for network failures, HTTP 429 and HTTP 5xx.
+Backoff is 1, 2 and 4 seconds. On 429, valid `Retry-After` delta-seconds or HTTP-date
+values replace backoff; malformed/missing values use backoff. Permanent HTTP errors
+and invalid successful responses fail immediately. A long valid Retry-After can
+extend a run; waits are not shortened. The final 429 also waits before releasing
+ownership, so the next scheduled run cannot bypass that cooldown. HTTP and sleeps
+happen outside SQL transactions.
+
+A PostgreSQL session advisory lock prevents simultaneous sync owners across app
+processes, in addition to the scheduler's existing `max_instances=1`. The owner
+keeps one pooled connection until completion but commits each page independently.
+A competing attempt gets a failed `sync_runs` row explaining that it was skipped;
+it does not change the active owner's state. The supplied schema has no skipped
+run status, so this is recorded as `failed` with zero counters.
+
+On ordinary failure, the run is marked failed without overwriting its committed
+cursor/counters. On process termination, PostgreSQL rolls back the open transaction
+and releases its session lock. The next owner marks any abandoned `running` rows
+failed, then resumes from `sync_state`. If PostgreSQL itself is unavailable, the
+failure can only be logged until it recovers. Acquisition failures before a run can
+be persisted cannot create a database audit row.
+
+`sync_runs` records starting and ending cursors, finish time, status and an error
+when applicable. Counters describe **committed pages**: `events_fetched` includes
+repeated rows in those pages, `events_applied` counts new inserts, and
+`events_skipped` counts duplicate insert attempts. Consequently fetched equals
+applied plus skipped, even after a partial failure. HTTP retries and rolled-back
+pages do not inflate these durable counters. Empty successful runs record zeros.
+Logs identify run IDs, cursors, retry attempts/waits, committed page counts and
+failures, so stopping and restarting the partner is diagnosable.
+
+### Configuration and verification
+
+`SYNC_INTERVAL_SECONDS` retains its default of `30`. Optional `SYNC_PAGE_SIZE`
+defaults to `10` and must be between `1` and the partner maximum of `50`; invalid
+values fail the recorded run. Set it in the app container environment to override.
+No additional production service, database table or dependency is required.
+
+```bash
+make install-dev
+make check
+make test-unit  # Both requirements; mocked external dependencies
+make test-e2e   # Both requirements; Docker required
+make test-all  # Unit suite, then E2E suite
+```
+
+The E2E suite still runs the real app, PostgreSQL and unchanged mock in an isolated
+Compose project. It now also verifies scheduler-driven historical backfill. For
+repeatable failure tests, the test container hosts a small scripted HTTP fixture
+and launches actual sync worker processes against separately seeded, temporary
+databases. This isolates fault injection from both development data and the app's
+background scheduler; it does not change the mock or patch production functions.
+The test image includes app code solely to run these real worker processes.
+
+New checks cover HTTP 500/429 retries (including elapsed Retry-After), duplicate
+pages, empty runs, failure after a committed page and resumption, rollback when
+progress auditing fails, unknown residents, competing sync processes, killing a
+worker mid-page, abandoned-run recovery, and concurrent real webhook/feed writes.
+Temporary constraints, blockers and databases are removed by fixture cleanup;
+Compose cleanup remains the final boundary. Worker logs join JUnit and container
+logs in `artifacts/`, which GitHub Actions uploads even on failure.
+
+CI runs both suites for PRs targeting `dev` or `main` and pushes to `dev`, `main`,
+`features`, or `feature/**`. Existing Makefile commands cover the expanded suites.
+`AGENTS.md` records repository rules; `SKILL.md` provides a focused ingestion and
+recovery workflow for future coding agents.
+
+### Follow-up and AI usage
+
+With more time: add operational alerts for repeated sync failures or stale cursors,
+a durable invalid-event remediation process, and a formal migration workflow. Avoid
+adding these systems before the assessment requires them. Session locks require a
+direct/session-preserving PostgreSQL connection; transaction-pooling proxies would
+need a different ownership mechanism.
+
+ChatGPT/Codex implemented this follow-up from the current `dev` branch, including
+the shared insertion refactor, sync service, tests, agent instructions and documentation.
+The candidate selected the per-page atomicity, duplicate protection, retry and lock
+strategy in discussion and should review the implementation and record actual time
+spent before submission. This section does not claim completion of requirement 3.
