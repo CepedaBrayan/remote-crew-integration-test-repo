@@ -1,16 +1,7 @@
-"""LeaseFlow Integration Service — your workspace.
+"""LeaseFlow integration API and scheduler.
 
-You are building LeaseFlow's integration layer with BigPMS (the property
-management system of record). Four TODOs, described fully in docs/SPEC.md:
-
-  1. Register a webhook subscription with BigPMS, and implement the callback
-     endpoint (POST /webhooks/bigpms)
-  2. sync_bigpms_ledger_events()  — scheduled feed sync (scheduler wired below)
-  3. GET /api/v1/reconciliation — reconciliation report
-  4. README write-up
-
-The health check, DB pool (db.py), and scheduler wiring are done for you.
-Structure the rest however you like — add modules freely.
+Requirements 1 and 2 are implemented: authenticated webhooks and durable feed
+sync. Reconciliation (requirement 3) remains a TODO; see docs/SPEC.md and README.
 """
 
 import logging
@@ -21,6 +12,7 @@ from auth import auth
 from fastapi import FastAPI, Request, Response
 from orm import ensure_payment_events_uniqueness, get_health_check_status, get_residents
 from starlette.concurrency import run_in_threadpool
+from sync import run_feed_sync
 from webhooks import process_webhook, register_subscription
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -32,6 +24,7 @@ BIGPMS_API_URL = os.environ.get("BIGPMS_API_URL", "http://localhost:3001")
 CALLBACK_URL = os.environ.get("CALLBACK_URL", "http://localhost:8000/webhooks/bigpms")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "leaseflow-dev-secret")
 SYNC_INTERVAL_SECONDS = int(os.environ.get("SYNC_INTERVAL_SECONDS", "30"))
+SYNC_PAGE_SIZE = int(os.environ.get("SYNC_PAGE_SIZE", "10"))
 
 app = FastAPI(title="LeaseFlow Integration Service")
 
@@ -54,7 +47,7 @@ def list_residents():
 
 
 # ---------------------------------------------------------------------------
-# TODO 1 — Webhook subscription + callback endpoint (see SPEC section 1)
+# Requirement 1 — Webhook subscription + callback endpoint (see SPEC section 1)
 #
 # Register with BigPMS so it starts sending events:
 #   POST {BIGPMS_API_URL}/api/v1/webhook-subscriptions
@@ -86,14 +79,17 @@ async def bigpms_webhook(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# TODO 2 — Scheduled feed sync (see SPEC section 2)
+# Requirement 2 — Scheduled feed sync (see SPEC section 2)
 # ---------------------------------------------------------------------------
 
 
 def sync_bigpms_ledger_events():
-    """Runs every SYNC_INTERVAL_SECONDS (scheduler is wired below)."""
-    # TODO: implement — see docs/SPEC.md
-    log.info("sync_bigpms_ledger_events: not implemented yet")
+    """Backfill partner payments from the last durable cursor on each interval.
+
+    The sync service records failures and preserves committed pages for the next
+    scheduled attempt. A database advisory lock prevents overlapping workers.
+    """
+    run_feed_sync(BIGPMS_API_URL, SYNC_PAGE_SIZE)
 
 
 scheduler = BackgroundScheduler()

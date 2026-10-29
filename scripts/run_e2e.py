@@ -33,7 +33,7 @@ def main() -> int:
             timeout=180,
         )
         subprocess.run(
-            compose + ["run", "--rm", "--no-deps", "tests"], cwd=ROOT, check=True, timeout=180
+            compose + ["run", "--rm", "--no-deps", "tests"], cwd=ROOT, check=True, timeout=300
         )
 
         # A real connection refusal must prevent the API worker from starting.

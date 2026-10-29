@@ -1,10 +1,10 @@
-name: Requirement 1 tests
+name: Integration tests
 
 on:
   push:
-    branches: [features, main]
+    branches: [features, main, dev, "feature/**"]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read

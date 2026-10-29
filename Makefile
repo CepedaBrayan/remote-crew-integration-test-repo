@@ -86,7 +86,7 @@ install-dev: ## Install local tooling and test dependencies
 
 test: test-unit ## Run all unit tests without Docker or PostgreSQL
 
-test-unit: ## Test requirement 1 functions with mocked external dependencies
+test-unit: ## Test integration functions with mocked external dependencies
 	$(PYTHON) -m pytest -q tests/unit
 
 test-e2e: ## Build, test and clean up an isolated Docker stack
