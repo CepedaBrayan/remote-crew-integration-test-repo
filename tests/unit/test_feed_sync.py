@@ -222,8 +222,8 @@ def store_db(modules, monkeypatch):
     conn = MagicMock()
     cur = conn.cursor.return_value.__enter__.return_value
     release = Mock()
-    monkeypatch.setattr(modules.sync_store, "get_conn", Mock(return_value=conn))
-    monkeypatch.setattr(modules.sync_store, "put_conn", release)
+    monkeypatch.setattr(modules.orm, "get_conn", Mock(return_value=conn))
+    monkeypatch.setattr(modules.orm, "put_conn", release)
     return conn, cur, release
 
 
@@ -232,7 +232,7 @@ def test_session_releases_or_records_overlap(modules, store_db, owned):
     """Session locks are released; rejected ownership attempts get a failed run row."""
     conn, cur, release = store_db
     cur.fetchone.return_value = (owned,)
-    with modules.sync_store.sync_session() as result:
+    with modules.orm.sync_session() as result:
         assert result is (conn if owned else None)
     sql = " ".join(c.args[0] for c in cur.execute.call_args_list)
     assert ("pg_advisory_unlock" in sql) is owned
@@ -245,7 +245,7 @@ def test_unlock_failure_discards_session(modules, store_db):
     conn, cur, release = store_db
     cur.fetchone.return_value = (True,)
     cur.execute.side_effect = [None, psycopg2.OperationalError("lost connection")]
-    with modules.sync_store.sync_session():
+    with modules.orm.sync_session():
         pass
     conn.close.assert_called_once()
     release.assert_called_once_with(conn)
@@ -255,7 +255,7 @@ def test_begin_recovers_abandoned_runs(modules, store_db):
     """A new lock owner starts from persisted state and marks old running rows failed."""
     conn, cur, _ = store_db
     cur.fetchone.side_effect = [(12,), (42,)]
-    assert modules.sync_store.begin_sync_run(conn) == (42, 12)
+    assert modules.orm.begin_sync_run(conn) == (42, 12)
     assert "Interrupted" in cur.execute.call_args_list[1].args[0]
     assert conn.__exit__.call_args.args == (None, None, None)
 
@@ -265,7 +265,7 @@ def test_missing_sync_state_fails(modules, store_db):
     conn, cur, _ = store_db
     cur.fetchone.return_value = None
     with pytest.raises(RuntimeError, match="Missing seeded"):
-        modules.sync_store.begin_sync_run(conn)
+        modules.orm.begin_sync_run(conn)
 
 
 def test_page_writes_share_transaction(modules, store_db, page_data, monkeypatch):
@@ -274,9 +274,9 @@ def test_page_writes_share_transaction(modules, store_db, page_data, monkeypatch
     cur.fetchone.return_value = (0,)
     page_data["events"] *= 2
     insert = Mock(side_effect=["processed", "duplicate"])
-    monkeypatch.setattr(modules.sync_store, "insert_payment", insert)
+    monkeypatch.setattr(modules.orm, "insert_payment", insert)
     page = modules.dto.FeedPage.model_validate(page_data)
-    assert modules.sync_store.apply_feed_page(conn, 7, 0, page) == (1, 1)
+    assert modules.orm.apply_feed_page(conn, 7, 0, page) == (1, 1)
     assert all(call.args[0] is cur for call in insert.call_args_list)
     assert cur.execute.call_args.args[1] == (1, 2, 1, 1, 7)
     assert conn.__exit__.call_args.args == (None, None, None)
@@ -287,10 +287,10 @@ def test_failed_insert_stops_cursor_update(modules, store_db, page_data, monkeyp
     conn, cur, _ = store_db
     cur.fetchone.return_value = (0,)
     monkeypatch.setattr(
-        modules.sync_store, "insert_payment", Mock(side_effect=ValueError("Unknown resident"))
+        modules.orm, "insert_payment", Mock(side_effect=ValueError("Unknown resident"))
     )
     with pytest.raises(ValueError):
-        modules.sync_store.apply_feed_page(
+        modules.orm.apply_feed_page(
             conn, 7, 0, modules.dto.FeedPage.model_validate(page_data)
         )
     assert cur.execute.call_count == 1
@@ -300,7 +300,7 @@ def test_failed_insert_stops_cursor_update(modules, store_db, page_data, monkeyp
 def test_finish_preserves_durable_counters(modules, store_db):
     """Finishing changes outcome only; it cannot overwrite the committed range or counts."""
     conn, cur, release = store_db
-    modules.sync_store.finish_sync_run(7, "failed", "offline")
+    modules.orm.finish_sync_run(7, "failed", "offline")
     assert cur.execute.call_args_list[0].args[1] == ("failed", "offline", 7)
     assert "cursor_end" not in cur.execute.call_args_list[0].args[0]
     release.assert_called_once_with(conn)
@@ -310,7 +310,7 @@ def test_old_owner_cannot_overwrite_recovered_status(modules, store_db):
     """Once a newer owner recovered the old run, late finalization leaves state alone."""
     _, cur, _ = store_db
     cur.rowcount = 0
-    modules.sync_store.finish_sync_run(7, "failed", "connection lost")
+    modules.orm.finish_sync_run(7, "failed", "connection lost")
     assert cur.execute.call_count == 1
 
 

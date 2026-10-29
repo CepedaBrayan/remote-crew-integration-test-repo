@@ -7,7 +7,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 from dto import FeedPage
-from sync_store import apply_feed_page, begin_sync_run, finish_sync_run, sync_session
+from orm import apply_feed_page, begin_sync_run, finish_sync_run, sync_session
 
 log = logging.getLogger("leaseflow.sync")
 MAX_ATTEMPTS = 4

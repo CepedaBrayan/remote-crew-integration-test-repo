@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 import psycopg2
 import requests
 from fastapi import HTTPException
+from orm import read_reconciliation_snapshot
 from pydantic import BaseModel, Field
-from reconciliation_store import read_reconciliation_snapshot
 from sync import retry_delay
 
 log = logging.getLogger("leaseflow.reconciliation")
